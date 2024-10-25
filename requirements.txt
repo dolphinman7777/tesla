@@ -1,0 +1,9 @@
+solana
+aiohttp
+web3
+python-dotenv
+dune-client
+requests
+watchfiles
+flask==2.3.2
+
