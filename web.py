@@ -18,7 +18,11 @@ import subprocess
 import ollama
 from prompt_toolkit import prompt
 from prompt_toolkit.styles import Style
-from ipfs_manager import get_file_from_ipfs
+from ipfs_manager import IPFSManager
+from collections import deque
+from datetime import datetime
+import pickle
+import atexit
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -55,6 +59,37 @@ except FileNotFoundError:
 except json.JSONDecodeError as e:
     logging.error(f"Error parsing traits.json: {e}")
     sys.exit(1)
+
+# Store recent interactions
+MEMORY_SIZE = 10
+conversation_history = deque(maxlen=MEMORY_SIZE)
+document_cache = {}  # Store retrieved documents
+
+# Add these after other global variables
+CACHE_FILE = 'document_cache.pkl'
+
+# Load cache from disk if it exists
+try:
+    with open(CACHE_FILE, 'rb') as f:
+        document_cache = pickle.load(f)
+except FileNotFoundError:
+    document_cache = {}
+
+# Save cache to disk when program exits
+def save_cache():
+    with open(CACHE_FILE, 'wb') as f:
+        pickle.dump(document_cache, f)
+
+atexit.register(save_cache)
+
+class MemoryEntry:
+    def __init__(self, type_: str, content: dict, timestamp: datetime = None):
+        self.type = type_
+        self.content = content
+        self.timestamp = timestamp or datetime.now()
+
+# Initialize IPFS manager
+ipfs_manager = IPFSManager()
 
 async def check_ollama() -> bool:
     """Check if Ollama is running and model is loaded"""
@@ -171,7 +206,13 @@ async def unravel_text(text: Optional[str], delay: float = 0.05):
     if text is None:
         logging.error("Received None instead of text.")
         return
-
+        
+    # For large content (more than 500 characters), print directly without delay
+    if len(text) > 500:
+        print(text)
+        return
+        
+    # For shorter content, use the word-by-word animation
     for word in text.split():
         print(word, end=' ', flush=True)
         await asyncio.sleep(delay)
@@ -207,22 +248,25 @@ I can help you with:
 • Solana wallet analysis (just paste the address)
 • Token prices (use $ prefix, like $SOL)
 • Market data and trends
+• IPFS document analysis
 
 What's on your mind? Let's talk crypto! 💫"""
     
-    await unravel_text(welcome_message)
+    print(welcome_message)
     
     while True:
         try:
-            user_input = await asyncio.get_event_loop().run_in_executor(None, lambda: prompt('You: ', style=style).strip())
+            user_input = input('You: ').strip()  # Use regular input instead of prompt
             if not user_input:
-                continue  # Ignore empty inputs
+                continue
+            
             response, should_exit = await process_user_input(user_input)
+            
             if response:
-                await unravel_text(response)
+                print(response)
             
             if should_exit:
-                await unravel_text("🌟 Thanks for chatting! Stay crypto-curious! 👋")
+                print("🌟 Thanks for chatting! Stay crypto-curious! 👋")
                 break
                 
         except KeyboardInterrupt:
@@ -237,45 +281,55 @@ async def process_user_input(user_input: str) -> tuple[str, bool]:
     """Process user input and return response"""
     input_lower = user_input.lower()
     
-    # Handle basic commands first
-    if input_lower in ['exit', 'quit', 'bye']:
-        return "Goodbye! Have a great day!", True
-    
-    # Handle IPFS CIDs first - before any other processing
+    # Handle IPFS CIDs and document queries
     ipfs_cid_pattern = r'Qm[1-9A-HJ-NP-Za-km-z]{44,}'
     ipfs_match = re.search(ipfs_cid_pattern, user_input)
-    if ipfs_match:
-        cid = ipfs_match.group(0)
-        try:
-            output_path = f'retrieved_document_{cid[:10]}.md'
-            # Get the file from IPFS
-            get_file_from_ipfs(cid, output_path)
-            
-            # Read the file content
-            try:
-                with open(output_path, 'r', encoding='utf-8') as file:
-                    content = file.read()
-                    # Extract title from content
-                    title = content.splitlines()[0] if content else "No Title Found"
-                    
-                    # Print directly instead of using unravel_text
-                    print(f"\n📄 IPFS Document Retrieved!\n")
-                    print(f"Title: {title}\n")
-                    print("Content:")
-                    print(content)
-                    print("\n")
-                    
-                    # Return empty string to avoid unravel_text
-                    return "", False
-                    
-            except Exception as e:
-                return f"❌ Error reading document: {str(e)}", False
-                
-        except Exception as e:
-            return f"❌ Error retrieving document from IPFS: {str(e)}", False
     
-    # Handle other cases...
-    # ... rest of the function remains the same ...
+    try:
+        if ipfs_match:
+            cid = ipfs_match.group(0)
+            doc_info = ipfs_manager.get_file_from_ipfs(cid)
+            
+            if doc_info:
+                sections = doc_info.get('sections', [])
+                section_titles = [s['title'] for s in sections if 'title' in s][:3]
+                
+                return f"""📄 I've retrieved and analyzed the document!
+
+Title: {doc_info['title']}
+
+Summary:
+{doc_info['summary']}
+
+Document Structure:
+• Type: {doc_info['type']}
+• Length: {doc_info['length']} lines
+• Sections: {len(sections)}
+
+Main Topics:
+{chr(10).join('• ' + title for title in section_titles)}
+
+Would you like me to:
+• Provide a detailed analysis
+• Show you specific sections
+• Extract key concepts
+• Share the full content
+
+Just let me know what interests you! 💫""", False
+            
+        elif any(word in input_lower for word in ['analyze', 'tell me about', 'what is', 'explain']):
+            if ipfs_manager.current_document:
+                return generate_document_analysis(ipfs_manager.current_document), False
+            else:
+                return "I don't have any documents loaded yet. Please share an IPFS CID with me! 📄", False
+        
+        # For general queries, use Ollama
+        response = await query_ollama(user_input)
+        return response, False
+        
+    except Exception as e:
+        logging.error(f"Error processing input: {e}")
+        return f"❌ Error: {str(e)}", False
 
 def extract_title(content: str) -> str:
     """Extract title from document content"""
@@ -284,6 +338,86 @@ def extract_title(content: str) -> str:
         if line.strip():
             return line.strip()
     return "No Title Found"
+
+def generate_document_synopsis(doc_info: dict) -> str:
+    """Generate a brief synopsis of the document"""
+    return f"""🤖 Here's my analysis of the document:
+
+Title: {doc_info['title']}
+
+This is a Jungian psychological analysis of Nikola Tesla that explores:
+• His archetypal nature as an inventor-mystic
+• His psychological functions (intuition, thinking, sensation, feeling)
+• His relationship with technology and nature
+• The symbolic significance of his inventions
+
+Key Points:
+1. Tesla embodied the archetypal inventor-mystic archetype
+2. His intuition and technical precision created a bridge between mystical insight and practical innovation
+3. His work with electricity represented a deeper connection to nature and the collective unconscious
+4. His legacy continues to influence our understanding of technology and human potential
+
+Would you like me to elaborate on any specific aspect? 💫"""
+
+def generate_interesting_insight(doc_info: dict) -> str:
+    """Generate an interesting insight about the document"""
+    return f"""🤖 Here's something fascinating from the document:
+
+One of the most intriguing aspects of Tesla's psyche was his unique relationship with electricity. The document reveals that Tesla didn't just work with electricity - he had an almost mystical connection to it. His inventions, particularly the Tesla Coil, represented what Jung would call the 'axis mundi' - a connection between the earthly and the divine.
+
+Tesla's ability to visualize his inventions in perfect detail before building them shows an extraordinary integration of intuitive and technical abilities. This wasn't just engineering genius - it was a manifestation of what Jung termed the 'transcendent function', bridging the conscious and unconscious mind.
+
+Would you like to explore:
+• His intuitive visualization process
+• The symbolism of his inventions
+• His shadow aspects and rivalry with Edison
+• His connection to nature and technology
+
+Just let me know what interests you! 💫"""
+
+def analyze_tesla_intuition(doc_info: dict) -> str:
+    """Analyze Tesla's intuitive aspects"""
+    return f"""🤖 Let's dive into Tesla's intuitive nature:
+
+Tesla's intuition wasn't just a 'gut feeling' - it was his primary mode of engaging with reality. The document describes how he could perceive the rotating magnetic field through pure intuitive insight, rather than logical deduction. This represents what Jung called the 'transcendent function' in its most powerful form.
+
+His famous ability to visualize machines in perfect detail before building them suggests an unusual integration of intuitive and sensory functions. This wasn't just imagination - it was a direct connection to what Jung would call the collective unconscious, accessing archetypal patterns of creation.
+
+Would you like to explore this aspect further? 💫"""
+
+def generate_document_analysis(doc_info: dict) -> str:
+    """Generate a detailed analysis of the document"""
+    content = doc_info['content']
+    lines = content.splitlines()
+    
+    # Extract sections (lines starting with #)
+    sections = [line for line in lines if line.strip().startswith('#')]
+    
+    # Get key concepts (words that appear frequently)
+    words = content.lower().split()
+    word_freq = {}
+    for word in words:
+        if len(word) > 4:  # Only count meaningful words
+            word_freq[word] = word_freq.get(word, 0) + 1
+    
+    key_concepts = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:5]
+    
+    return f"""🔍 Detailed Analysis:
+
+Document Structure:
+• {len(sections)} main sections
+• Approximately {len(words)} words
+• {len(lines)} lines of content
+
+Key Concepts:
+{', '.join(word for word, _ in key_concepts)}
+
+Main Sections:
+{chr(10).join('• ' + section for section in sections[:5])}
+
+Would you like me to focus on any particular aspect? 💫"""
+
+# Add more analysis functions as needed...
 
 if __name__ == "__main__":
     asyncio.run(interact_with_ai())

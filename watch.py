@@ -22,7 +22,17 @@ except json.JSONDecodeError as e:
     exit(1)
 
 async def run_script():
-    await arun_process('.', target='python3 web.py')  # Watch the current directory
+    """Run the web.py script"""
+    try:
+        # Run the process
+        await arun_process('.', target='python3 web.py')
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
 if __name__ == '__main__':
-    asyncio.run(run_script())
+    try:
+        asyncio.run(run_script())
+    except KeyboardInterrupt:
+        print("\nExiting...")
+    except Exception as e:
+        print(f"Fatal error: {e}")
