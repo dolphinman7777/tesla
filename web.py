@@ -25,6 +25,9 @@ import pickle
 import atexit
 import threading
 import itertools
+import base58
+import multihash
+from analyze_cid import analyze_cid, print_analysis  # Add this import
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -313,93 +316,70 @@ class LoadingIndicator:
 # Create a global loading indicator
 loading = LoadingIndicator()
 
-# Update the process_user_input function
+# Add this at the top with other imports
+from typing import Optional, Dict
+
+# Add these global variables
+last_analyzed_content = None
+conversation_context = {
+    'last_cid': None,
+    'last_content': None,
+    'last_analysis': None,
+    'current_topic': None
+}
+
 async def process_user_input(user_input: str) -> tuple[str, bool]:
     """Process user input and return response"""
+    global conversation_context
     input_lower = user_input.lower()
     
-    try:
-        # Handle IPFS CIDs
-        ipfs_cid_pattern = r'Qm[1-9A-HJ-NP-Za-km-z]{44,}'
-        ipfs_match = re.search(ipfs_cid_pattern, user_input)
+    # Handle IPFS CIDs
+    ipfs_cid_pattern = r'Qm[1-9A-HJ-NP-Za-km-z]{44,}'
+    ipfs_match = re.search(ipfs_cid_pattern, user_input)
+    
+    if ipfs_match:
+        cid = ipfs_match.group(0)
+        print("🚀 Hey there! Jeff here. Let me analyze that IPFS content for you...")
         
-        if ipfs_match:
-            cid = ipfs_match.group(0)
+        # Start the loading animation
+        loading.start("🔍 Analyzing IPFS content")
+        
+        try:
+            # Temporarily redirect logging to suppress gateway attempts
+            log_level = logging.getLogger().level
+            logging.getLogger().setLevel(logging.WARNING)
             
-            # Start loading indicator
-            loading.start("🤔 Analyzing IPFS document")
+            # Fetch and analyze content
+            analysis_result = analyze_cid(cid)
             
-            try:
-                # Retrieve and analyze document
-                doc_info = ipfs_manager.get_file_from_ipfs(cid)
-                
-                if doc_info and 'content' in doc_info:
-                    content = doc_info['content']
-                    lines = content.splitlines()
-                    paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
-                    
-                    # If asking for analysis/insight
-                    if any(word in input_lower for word in ['tell', 'about', 'analyze', 'look']):
-                        return f"""📚 Let me share what I found in this document:
+            # Restore logging level
+            logging.getLogger().setLevel(log_level)
+            
+            # Stop loading animation
+            loading.stop()
+            
+            if "error" in analysis_result:
+                return f"💫 Oops! I ran into an issue: {analysis_result['error']}", False
 
-Title: {doc_info.get('title', 'Untitled')}
-
-Main Content:
-{doc_info.get('summary', paragraphs[0] if paragraphs else 'No content available')}
-
-Document Overview:
-• Type: {doc_info.get('type', 'text')}
-• Structure: {len(paragraphs)} paragraphs
-• Length: {len(lines)} lines
-• Size: {len(content.encode('utf-8'))/1024:.1f}KB
-
-Would you like me to:
-• Show you the full content
-• Analyze specific sections
-• Extract key concepts
-
-Just let me know! 💫""", False
-                    
-                    # If requesting full content
-                    elif 'full' in input_lower or 'content' in input_lower:
-                        return f"""📄 Here's the complete document:
-
-{content}
-
-Would you like me to analyze any specific aspect? 💫""", False
-                    
-                    # Default response
-                    return f"""📚 I've retrieved the document:
-
-Title: {doc_info.get('title', 'Untitled')}
-Type: {doc_info.get('type', 'text')}
-Size: {len(content.encode('utf-8'))/1024:.1f}KB
-
-Would you like me to:
-• Analyze the content
-• Show key concepts
-• Display the full text
-
-Just let me know! 💫""", False
-                    
-            except Exception as e:
-                return f"❌ Error analyzing document: {str(e)}", False
-            finally:
-                loading.stop()
-        
-        # Handle follow-up questions without getting stuck
-        elif any(word in input_lower for word in ['show', 'tell', 'explain', 'what']):
-            if ipfs_manager.current_document:
-                return generate_document_analysis(ipfs_manager.current_document), False
-            else:
-                return "I don't have any documents loaded yet. Please share an IPFS CID with me! 📄", False
-        
-        # For general queries
-        return await query_ollama(user_input), False
-        
-    except Exception as e:
-        logging.error(f"Error processing input: {e}")
-        return f"❌ Error: {str(e)}", False
+            # Store the content and CID in conversation context
+            conversation_context.update({
+                'last_cid': cid,
+                'last_content': analysis_result['content'],
+                'last_analysis': analysis_result,
+                'current_topic': 'ipfs_analysis'
+            })
+            
+            # Format the response
+            response = format_ipfs_analysis(analysis_result)
+            return response, False
+            
+        except Exception as e:
+            loading.stop()
+            logging.error(f"Error in IPFS analysis: {str(e)}")
+            return f"💫 Oops! Something went wrong while analyzing the content: {str(e)}", False
+    
+    # If no specific command or CID, use Ollama for general conversation
+    return await query_ollama(user_input), False
 
 def extract_title(content: str) -> str:
     """Extract title from document content"""
@@ -487,8 +467,166 @@ Main Sections:
 
 Would you like me to focus on any particular aspect? 💫"""
 
+def analyze_document_purpose(content: str) -> str:
+    """Analyze the purpose of the document based on its content"""
+    # Add actual content analysis logic here
+    return "Document purpose analysis"
+
+def analyze_document_structure(content: str) -> str:
+    """Analyze the structure of the document"""
+    # Add actual structure analysis logic here
+    return "Document structure analysis"
+
 # Add more analysis functions as needed...
+
+def is_valid_cid(cid):
+    try:
+        # Try to decode the CID using base58
+        decoded = base58.b58decode(cid)
+        # Valid CIDs should be at least 2 bytes long
+        return len(decoded) > 2
+    except:
+        return False
+
+def fetch_ipfs_content(cid):
+    """Fetch content from IPFS using a public gateway"""
+    gateways = [
+        f"https://ipfs.io/ipfs/{cid}",
+        f"https://gateway.pinata.cloud/ipfs/{cid}",
+        f"https://cloudflare-ipfs.com/ipfs/{cid}"
+    ]
+    
+    for gateway in gateways:
+        try:
+            response = requests.get(gateway, timeout=10)
+            if response.status_code == 200:
+                return {
+                    'content': response.text,
+                    'size': len(response.content),
+                    'retrieved': datetime.now().isoformat(),
+                    'type': response.headers.get('content-type', 'unknown')
+                }
+        except:
+            continue
+    return None
+
+def handle_message(message):
+    # Check for IPFS CID pattern
+    cid_pattern = r'Qm[1-9A-HJ-NP-Za-km-z]{44,}'
+    matches = re.findall(cid_pattern, message)
+    
+    if matches:
+        cid = matches[0]
+        if is_valid_cid(cid):
+            content = fetch_ipfs_content(cid)
+            if content:
+                return f"""🔍 Analyzing IPFS document...
+📊 IPFS Document Analysis:
+
+Content:
+{content['content'][:500]}{'...' if len(content['content']) > 500 else ''}
+
+Document Details:
+• CID: {cid}
+• Type: {content['type']}
+• Retrieved: {content['retrieved']}
+• Size: {content['size']} bytes
+
+Would you like me to:
+• Extract key concepts
+• Provide a detailed summary
+• Analyze specific sections
+
+Just let me know! 💫"""
+            
+    # Handle other message types...
+    return default_response(message)
+
+def analyze_themes(content: str) -> str:
+    """Analyze key themes in the content"""
+    themes = []
+    
+    # Look for recurring concepts and themes
+    if "Tesla" in content:
+        themes.extend([
+            "Inventor-Mystic Archetype",
+            "Integration of Intuition and Technology",
+            "Psychological Functions",
+            "Shadow and Persona",
+            "Symbolic Significance of Inventions"
+        ])
+    
+    # Add more theme detection logic here
+    
+    return "\n".join(f"• {theme}" for theme in themes)
+
+def extract_key_information(content: str) -> str:
+    """Extract key information from the content"""
+    sections = {}
+    current_section = "Main"
+    
+    for line in content.split('\n'):
+        if line.startswith('##'):
+            current_section = line.strip('#').strip()
+            sections[current_section] = []
+        elif line.strip() and current_section in sections:
+            sections[current_section].append(line.strip())
+    
+    return sections
+
+def analyze_technical_aspects(content: str) -> str:
+    """Analyze technical aspects of the content"""
+    word_count = len(content.split())
+    sections = len([line for line in content.split('\n') if line.strip().startswith('#')])
+    
+    return f"""🔧 Technical Analysis:
+• Word Count: {word_count}
+• Number of Sections: {sections}
+• Structure: {'Well-structured' if sections > 3 else 'Basic structure'}
+• Format: {'Markdown' if '#' in content else 'Plain text'}
+
+Would you like me to analyze any specific aspect in detail? 🌟"""
+
+def get_conversation_context() -> Dict:
+    """Get the current conversation context"""
+    return conversation_context
+
+def clear_conversation_context():
+    """Clear the conversation context"""
+    global conversation_context
+    conversation_context = {
+        'last_cid': None,
+        'last_content': None,
+        'last_analysis': None,
+        'current_topic': None
+    }
+
+def format_ipfs_analysis(analysis_result: dict) -> str:
+    """Format the IPFS analysis result for display"""
+    content = analysis_result['content']
+    
+    # Extract title
+    lines = content.split('\n')
+    title = next((line.strip('# ') for line in lines if line.strip().startswith('#')), "Untitled Document")
+    
+    response = f"""📊 Here's what I found in the IPFS document:
+Title: {title}
+
+📝 Content:
+{content}
+
+🔧 Technical Details:
+• Size: {analysis_result['size']} bytes
+• Content Type: {analysis_result.get('content_type', 'unknown')}
+
+💫 Would you like me to:
+• Analyze the content's key themes
+• Provide a summary
+• Extract specific information
+
+Just let me know what interests you! 🌟"""
+    
+    return response
 
 if __name__ == "__main__":
     asyncio.run(interact_with_ai())
-

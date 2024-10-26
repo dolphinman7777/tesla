@@ -143,26 +143,76 @@ def interact_with_document(cid: str):
     output_path = 'retrieved_document.md'
     
     # Retrieve the file from IPFS
-    get_file_from_ipfs(cid, output_path)
-    print(f"File retrieved from IPFS and saved to {output_path}")
+    doc_info = ipfs_manager.get_file_from_ipfs(cid)  # Use the ipfs_manager instance
     
-    # Simulate Jeff interacting with the document
+    if doc_info and 'content' in doc_info:
+        content = doc_info['content']
+        print("Jeff is processing the document...")
+        
+        # Example: Extract the title from the document
+        title = extract_title(content)
+        print(f"Document Title: {title}")
+        
+        # Generate document analysis
+        analysis = generate_document_analysis(doc_info)
+        print(analysis)
+    else:
+        print("Error: Failed to retrieve the document from IPFS.")
+
+from analyze_cid import analyze_cid, print_analysis
+from config.ai_persona import get_system_prompt
+import json
+import logging
+
+def jeff_analyze_ipfs(cid: str):
+    """Jeff's interface for analyzing IPFS content"""
+    print("🚀 Hey there! Jeff here. Let me analyze that IPFS content for you...")
+    
     try:
-        with open(output_path, 'r') as file:
-            content = file.read()
-            print("Jeff is processing the document...")
-            # Example: Extract the title from the document
-            title = extract_title(content)
-            print(f"Document Title: {title}")
-    except FileNotFoundError:
-        print("Error: File not found.")
+        # Use the working analyze_cid function to get the content
+        analysis_result = analyze_cid(cid)
+        
+        if "error" in analysis_result:
+            print(f"💫 Oops! I ran into an issue: {analysis_result['error']}")
+            return
+
+        # Get the actual content
+        content = analysis_result['content']
+        
+        print("\n📊 Here's what I found in the IPFS document:")
+        print(f"CID: {analysis_result['cid']}")
+        
+        # Extract and display title if present
+        lines = content.split('\n')
+        title = next((line.strip('# ') for line in lines if line.strip().startswith('#')), "Untitled Document")
+        print(f"Title: {title}")
+        
+        print("\n📝 Content:")
+        print(content)  # Print the actual content
+        
+        print("\n🔧 Technical Details:")
+        print(f"• Retrieved from: {analysis_result.get('gateway_used', 'unknown gateway')}")
+        print(f"• Retrieved at: {analysis_result['retrieved']}")
+        print(f"• Size: {analysis_result['size']} bytes")
+        print(f"• Content Type: {analysis_result.get('content_type', 'unknown')}")
+        
+        if 'cid_details' in analysis_result:
+            print("\n🔐 CID Technical Info:")
+            for key, value in analysis_result['cid_details'].items():
+                print(f"• {key}: {value}")
+        
+        print("\n💫 Would you like me to:")
+        print("• Analyze the content's key themes")
+        print("• Provide a summary")
+        print("• Extract specific information")
+        print("\nJust let me know what interests you! 🌟")
+        
     except Exception as e:
-        print(f"An error occurred while processing the document: {e}")
+        logging.error(f"Error in jeff_analyze_ipfs: {str(e)}")
+        print(f"💫 Oops! Something went wrong while analyzing the content: {str(e)}")
+        print("Let me know if you'd like me to try again!")
 
 if __name__ == "__main__":
-    main()
-    test_ipfs_integration()
-    retrieve_file_from_ipfs()
-    # Replace with your actual CID
-    document_cid = 'QmcQgPjXUvmitBcd3BHjNyEk2HRe7D4YU5smFnLMNi1WW7'
-    interact_with_document(document_cid)
+    # For testing, use a known working CID
+    test_cid = "bafybeicdn4wyj7e4rywuudatxhq3xmgpgtzfqvo6k5c2dybriepnfax2mi"
+    jeff_analyze_ipfs(test_cid)

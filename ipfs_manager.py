@@ -2,7 +2,7 @@ import ipfshttpclient
 import logging
 import requests
 import os
-from typing import Optional
+from typing import Optional, Dict, Any
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 import json
@@ -52,23 +52,74 @@ class IPFSManager:
         except Exception as e:
             logging.error(f"Error saving index: {e}")
 
-    def get_file_from_ipfs(self, cid: str) -> Optional[dict]:
-        """Retrieve a file from IPFS using its CID"""
+    def get_file_from_ipfs(self, cid: str) -> Dict[str, Any]:
+        """Retrieve file from IPFS and return document info"""
         try:
-            # Check cache first
-            doc_info = self.get_from_cache(cid)
-            if doc_info:
-                self.update_document_context(doc_info)
-                return doc_info
-
-            # Try retrieving from IPFS
-            doc_info = self.retrieve_from_ipfs(cid)
-            if doc_info:
-                self.update_document_context(doc_info)
-                return doc_info
-
+            # First check the cache
+            cache_path = os.path.join(self.cache_dir, f"{cid}.md")
+            if os.path.exists(cache_path):
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                return {
+                    'content': content,
+                    'type': 'markdown',
+                    'retrieved_at': datetime.now().isoformat()
+                }
+            
+            # Updated list of reliable IPFS gateways
+            gateways = [
+                f"https://dweb.link/ipfs/{cid}",
+                f"https://ipfs.io/ipfs/{cid}",
+                f"https://gateway.ipfs.io/ipfs/{cid}",
+                f"https://cloudflare-ipfs.com/ipfs/{cid}",
+                f"https://w3s.link/ipfs/{cid}"
+            ]
+            
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0',
+                'Accept': 'text/plain, text/markdown, application/json, */*'
+            })
+            
+            for gateway in gateways:
+                try:
+                    logging.info(f"Trying gateway: {gateway}")
+                    response = session.get(gateway, timeout=10)
+                    
+                    if response.status_code == 200:
+                        content = response.text
+                        
+                        # Validate content
+                        if content and len(content.strip()) > 0:
+                            # Save to cache
+                            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                            with open(cache_path, 'w', encoding='utf-8') as f:
+                                f.write(content)
+                            
+                            doc_info = {
+                                'content': content,
+                                'type': 'markdown',
+                                'retrieved_at': datetime.now().isoformat(),
+                                'title': self.extract_title(content.splitlines())
+                            }
+                            
+                            # Update index
+                            self.document_index[cid] = {
+                                'title': doc_info['title'],
+                                'retrieved_at': doc_info['retrieved_at'],
+                                'type': doc_info['type']
+                            }
+                            self.save_index()
+                            
+                            return doc_info
+                except Exception as e:
+                    logging.warning(f"Gateway {gateway} failed: {str(e)}")
+                    continue
+            
+            raise Exception("Unable to retrieve document from any IPFS gateway")
+            
         except Exception as e:
-            logging.error(f"Error retrieving document: {e}")
+            logging.error(f"Error retrieving from IPFS: {str(e)}")
             raise
 
     def update_document_context(self, doc_info: dict):
@@ -181,7 +232,7 @@ class IPFSManager:
         self.gateways = [
             "https://ipfs.io/ipfs/",
             "https://dweb.link/ipfs/",
-            "https://cloudflare-ipfs.com/ipfs/",
+            "https://cf-ipfs.com/ipfs/",
             "https://gateway.pinata.cloud/ipfs/"
         ]
         
@@ -193,12 +244,12 @@ class IPFSManager:
         for gateway in self.gateways:
             try:
                 url = f"{gateway}{cid}"
-                logging.info(f"🔍 Accessing {gateway}")
+                logging.info(f"🔍 Trying gateway: {gateway}")
                 
                 response = requests.get(
                     url, 
                     headers=headers,
-                    timeout=15,
+                    timeout=10,
                     verify=True,
                     allow_redirects=True
                 )
@@ -206,32 +257,27 @@ class IPFSManager:
                 if response.status_code == 200:
                     content = response.text
                     
-                    # Basic document processing
-                    lines = content.splitlines()
-                    paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
-                    
-                    # Create basic document info with required fields
-                    doc_info = {
-                        'cid': cid,
-                        'content': content,
-                        'title': self.extract_title(lines),
-                        'paragraphs': paragraphs,
-                        'sections': self.extract_sections(lines),
-                        'word_count': len(content.split()),
-                        'line_count': len(lines),
-                        'retrieved_from': gateway,
-                        'retrieved_at': datetime.now().isoformat(),
-                        'summary': self.create_basic_summary(content),  # Add basic summary
-                        'type': 'markdown'
-                    }
-                    
-                    return doc_info
-                    
+                    # Validate we got actual content
+                    if len(content.strip()) > 20 and 'Gateway Checker' not in content:
+                        doc_info = {
+                            'cid': cid,
+                            'content': content,
+                            'title': self.extract_title(content.splitlines()),
+                            'retrieved_from': gateway,
+                            'retrieved_at': datetime.now().isoformat(),
+                            'type': self.detect_document_type(content)
+                        }
+                        
+                        # Cache valid content
+                        self.save_to_cache(cid, doc_info)
+                        self.current_document = doc_info
+                        return doc_info
+                        
             except Exception as e:
                 logging.warning(f"Failed to retrieve from {gateway}: {str(e)}")
                 continue
         
-        raise Exception("Could not retrieve valid document from any gateway")
+        raise Exception("Could not retrieve valid content from any gateway")
 
     def extract_title(self, lines: list) -> str:
         """Extract title from document lines"""
@@ -371,3 +417,4 @@ def create_session():
     session.mount('http://', adapter)
     session.mount('https://', adapter)
     return session
+

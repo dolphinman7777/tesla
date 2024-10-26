@@ -3,7 +3,9 @@ aiohttp
 web3
 python-dotenv
 dune-client
-requests
+requests==2.31.0
 watchfiles
 flask==2.3.2
+base58==2.1.1
+multihash==0.1.1
 
