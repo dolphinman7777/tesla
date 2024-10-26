@@ -23,6 +23,8 @@ from collections import deque
 from datetime import datetime
 import pickle
 import atexit
+import threading
+import itertools
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -277,55 +279,123 @@ What's on your mind? Let's talk crypto! 💫"""
             print("Let's try again with a different question!")
             continue
 
+class LoadingIndicator:
+    def __init__(self, message="Processing"):
+        self.message = message
+        self.loading = False
+        self._thread = None
+
+    def _animate(self):
+        # Animation characters
+        chars = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
+        # Clear the current line
+        sys.stdout.write('\r')
+        while self.loading:
+            sys.stdout.write(f'\r{next(chars)} {self.message}...')
+            sys.stdout.flush()
+            time.sleep(0.1)
+        # Clear the loading message when done
+        sys.stdout.write('\r' + ' ' * (len(self.message) + 10) + '\r')
+        sys.stdout.flush()
+
+    def start(self, message=None):
+        if message:
+            self.message = message
+        self.loading = True
+        self._thread = threading.Thread(target=self._animate)
+        self._thread.start()
+
+    def stop(self):
+        self.loading = False
+        if self._thread:
+            self._thread.join()
+
+# Create a global loading indicator
+loading = LoadingIndicator()
+
+# Update the process_user_input function
 async def process_user_input(user_input: str) -> tuple[str, bool]:
     """Process user input and return response"""
     input_lower = user_input.lower()
     
-    # Handle IPFS CIDs and document queries
-    ipfs_cid_pattern = r'Qm[1-9A-HJ-NP-Za-km-z]{44,}'
-    ipfs_match = re.search(ipfs_cid_pattern, user_input)
-    
     try:
+        # Handle IPFS CIDs
+        ipfs_cid_pattern = r'Qm[1-9A-HJ-NP-Za-km-z]{44,}'
+        ipfs_match = re.search(ipfs_cid_pattern, user_input)
+        
         if ipfs_match:
             cid = ipfs_match.group(0)
-            doc_info = ipfs_manager.get_file_from_ipfs(cid)
             
-            if doc_info:
-                sections = doc_info.get('sections', [])
-                section_titles = [s['title'] for s in sections if 'title' in s][:3]
+            # Start loading indicator
+            loading.start("🤔 Analyzing IPFS document")
+            
+            try:
+                # Retrieve and analyze document
+                doc_info = ipfs_manager.get_file_from_ipfs(cid)
                 
-                return f"""📄 I've retrieved and analyzed the document!
+                if doc_info and 'content' in doc_info:
+                    content = doc_info['content']
+                    lines = content.splitlines()
+                    paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+                    
+                    # If asking for analysis/insight
+                    if any(word in input_lower for word in ['tell', 'about', 'analyze', 'look']):
+                        return f"""📚 Let me share what I found in this document:
 
-Title: {doc_info['title']}
+Title: {doc_info.get('title', 'Untitled')}
 
-Summary:
-{doc_info['summary']}
+Main Content:
+{doc_info.get('summary', paragraphs[0] if paragraphs else 'No content available')}
 
-Document Structure:
-• Type: {doc_info['type']}
-• Length: {doc_info['length']} lines
-• Sections: {len(sections)}
-
-Main Topics:
-{chr(10).join('• ' + title for title in section_titles)}
+Document Overview:
+• Type: {doc_info.get('type', 'text')}
+• Structure: {len(paragraphs)} paragraphs
+• Length: {len(lines)} lines
+• Size: {len(content.encode('utf-8'))/1024:.1f}KB
 
 Would you like me to:
-• Provide a detailed analysis
-• Show you specific sections
+• Show you the full content
+• Analyze specific sections
 • Extract key concepts
-• Share the full content
 
-Just let me know what interests you! 💫""", False
-            
-        elif any(word in input_lower for word in ['analyze', 'tell me about', 'what is', 'explain']):
+Just let me know! 💫""", False
+                    
+                    # If requesting full content
+                    elif 'full' in input_lower or 'content' in input_lower:
+                        return f"""📄 Here's the complete document:
+
+{content}
+
+Would you like me to analyze any specific aspect? 💫""", False
+                    
+                    # Default response
+                    return f"""📚 I've retrieved the document:
+
+Title: {doc_info.get('title', 'Untitled')}
+Type: {doc_info.get('type', 'text')}
+Size: {len(content.encode('utf-8'))/1024:.1f}KB
+
+Would you like me to:
+• Analyze the content
+• Show key concepts
+• Display the full text
+
+Just let me know! 💫""", False
+                    
+            except Exception as e:
+                return f"❌ Error analyzing document: {str(e)}", False
+            finally:
+                loading.stop()
+        
+        # Handle follow-up questions without getting stuck
+        elif any(word in input_lower for word in ['show', 'tell', 'explain', 'what']):
             if ipfs_manager.current_document:
                 return generate_document_analysis(ipfs_manager.current_document), False
             else:
                 return "I don't have any documents loaded yet. Please share an IPFS CID with me! 📄", False
         
-        # For general queries, use Ollama
-        response = await query_ollama(user_input)
-        return response, False
+        # For general queries
+        return await query_ollama(user_input), False
         
     except Exception as e:
         logging.error(f"Error processing input: {e}")
@@ -421,3 +491,4 @@ Would you like me to focus on any particular aspect? 💫"""
 
 if __name__ == "__main__":
     asyncio.run(interact_with_ai())
+

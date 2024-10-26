@@ -6,6 +6,7 @@ from typing import Optional
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 import json
+from datetime import datetime
 
 class IPFSManager:
     def __init__(self):
@@ -135,26 +136,28 @@ class IPFSManager:
 
     def generate_summary(self, content: str) -> str:
         """Generate a meaningful summary of the document"""
-        lines = content.splitlines()
-        paragraphs = []
-        current_para = []
-        
-        for line in lines:
-            if line.strip():
-                current_para.append(line.strip())
-            elif current_para:
-                paragraphs.append(' '.join(current_para))
-                current_para = []
-        
-        if current_para:
-            paragraphs.append(' '.join(current_para))
-        
-        # Get first meaningful paragraph
-        for para in paragraphs:
-            if len(para) > 50 and not para.startswith('#'):
-                return para[:300] + "..." if len(para) > 300 else para
+        try:
+            # Split into paragraphs
+            paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
             
-        return paragraphs[0] if paragraphs else "No content available"
+            # Find the first substantial paragraph that's not a heading
+            for para in paragraphs:
+                if not para.startswith('#') and len(para.split()) > 10:
+                    # Clean up the paragraph
+                    clean_para = ' '.join(para.split())
+                    # Return truncated version if too long
+                    return clean_para[:300] + '...' if len(clean_para) > 300 else clean_para
+            
+            # Fallback to first non-empty paragraph
+            for para in paragraphs:
+                if para.strip():
+                    return para.strip()
+                    
+            return "No meaningful content found"
+            
+        except Exception as e:
+            logging.error(f"Error generating summary: {e}")
+            return "Error generating summary"
 
     def get_from_cache(self, cid: str) -> Optional[dict]:
         """Get a document from cache"""
@@ -174,31 +177,28 @@ class IPFSManager:
 
     def retrieve_from_ipfs(self, cid: str) -> Optional[dict]:
         """Retrieve a file from IPFS"""
-        # Updated gateway list with most reliable gateways
+        # Use reliable gateways
         self.gateways = [
-            "https://dweb.link/ipfs/",
             "https://ipfs.io/ipfs/",
-            "https://gateway.ipfs.io/ipfs/",
-            "https://cf-ipfs.com/ipfs/"
+            "https://dweb.link/ipfs/",
+            "https://cloudflare-ipfs.com/ipfs/",
+            "https://gateway.pinata.cloud/ipfs/"
         ]
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/plain, text/markdown, */*',
-            'Connection': 'close'
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'text/plain, text/markdown, */*'
         }
         
         for gateway in self.gateways:
             try:
                 url = f"{gateway}{cid}"
-                logging.info(f"Trying gateway: {gateway}")
+                logging.info(f"🔍 Accessing {gateway}")
                 
-                session = requests.Session()
-                session.headers.update(headers)
-                
-                response = session.get(
+                response = requests.get(
                     url, 
-                    timeout=(5, 15),  # (connect timeout, read timeout)
+                    headers=headers,
+                    timeout=15,
                     verify=True,
                     allow_redirects=True
                 )
@@ -206,45 +206,32 @@ class IPFSManager:
                 if response.status_code == 200:
                     content = response.text
                     
-                    # Validate content
-                    if self.is_valid_document(content):
-                        # Save to cache
-                        cache_path = os.path.join(self.cache_dir, f"{cid}.md")
-                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                        
-                        with open(cache_path, 'w', encoding='utf-8') as f:
-                            f.write(content)
-                        
-                        # Extract title and update index
-                        lines = content.splitlines()
-                        title = self.extract_title(lines)
-                        
-                        # Get a proper summary
-                        summary = self.generate_summary(content)
-                        
-                        doc_info = {
-                            'title': title,
-                            'content': content,
-                            'retrieved_from': gateway,
-                            'type': self.detect_document_type(content),
-                            'summary': summary,
-                            'length': len(lines),
-                            'sections': self.extract_sections(lines)
-                        }
-                        
-                        self.document_index[cid] = doc_info
-                        self.save_index()
-                        
-                        logging.info(f"Successfully retrieved document from {gateway}")
-                        return doc_info
-                
+                    # Basic document processing
+                    lines = content.splitlines()
+                    paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+                    
+                    # Create basic document info with required fields
+                    doc_info = {
+                        'cid': cid,
+                        'content': content,
+                        'title': self.extract_title(lines),
+                        'paragraphs': paragraphs,
+                        'sections': self.extract_sections(lines),
+                        'word_count': len(content.split()),
+                        'line_count': len(lines),
+                        'retrieved_from': gateway,
+                        'retrieved_at': datetime.now().isoformat(),
+                        'summary': self.create_basic_summary(content),  # Add basic summary
+                        'type': 'markdown'
+                    }
+                    
+                    return doc_info
+                    
             except Exception as e:
-                logging.warning(f"Error with {gateway}: {str(e)}")
+                logging.warning(f"Failed to retrieve from {gateway}: {str(e)}")
                 continue
-            finally:
-                session.close()
         
-        raise Exception("Failed to retrieve valid document from all IPFS gateways")
+        raise Exception("Could not retrieve valid document from any gateway")
 
     def extract_title(self, lines: list) -> str:
         """Extract title from document lines"""
@@ -282,6 +269,75 @@ class IPFSManager:
             return False
         
         return True
+
+    def create_basic_summary(self, content: str) -> str:
+        """Create a basic summary of the content"""
+        try:
+            # Get first non-empty paragraph
+            paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+            if paragraphs:
+                first_para = paragraphs[0]
+                # Truncate if too long
+                return first_para[:300] + "..." if len(first_para) > 300 else first_para
+            return "No content available for summary"
+        except Exception as e:
+            logging.error(f"Error creating summary: {e}")
+            return "Error creating summary"
+
+    def save_to_cache(self, cid: str, doc_info: dict):
+        """Save document to cache"""
+        try:
+            # Save content file
+            cache_path = os.path.join(self.cache_dir, f"{cid}.txt")
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                f.write(doc_info['content'])
+            
+            # Update index
+            self.document_index[cid] = {
+                'title': doc_info['title'],
+                'retrieved_at': doc_info['retrieved_at'],
+                'type': doc_info['type']
+            }
+            self.save_index()
+            
+        except Exception as e:
+            logging.error(f"Error saving to cache: {e}")
+
+    def create_summary(self, paragraphs: list) -> str:
+        """Create a summary from paragraphs"""
+        for para in paragraphs:
+            # Find first substantial paragraph
+            if len(para.split()) > 5 and not para.startswith('#'):
+                return para[:300] + '...' if len(para) > 300 else para
+        return "No meaningful content found"
+
+    def analyze_content(self, content: str) -> str:
+        """Analyze content and create a meaningful summary"""
+        try:
+            # Split into paragraphs
+            paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+            
+            # Get meaningful content
+            meaningful_content = []
+            for para in paragraphs:
+                # Skip headers and short lines
+                if not para.startswith('#') and len(para.split()) > 5:
+                    meaningful_content.append(para)
+            
+            if meaningful_content:
+                # Get the first substantial paragraph
+                summary = meaningful_content[0]
+                # Truncate if too long
+                if len(summary) > 300:
+                    summary = summary[:300] + "..."
+                return summary
+            
+            return "No meaningful content found"
+            
+        except Exception as e:
+            logging.error(f"Error analyzing content: {e}")
+            return "Error analyzing content"
 
 def connect_to_ipfs():
     """Connect to the local IPFS node."""
